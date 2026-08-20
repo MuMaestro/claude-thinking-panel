@@ -86,8 +86,16 @@ def parse_line(raw, src):
                     events.append(Event("thinking", ts, "💭 thinking", body, True, src))
             elif ct == "tool_use":
                 inp = c.get("input", {}) or {}
+                # Collapsed line: the INTENT of the call, not the JSON. Order:
+                # description (Bash/Agent state the why) > the tool's salient
+                # field > JSON as a last resort. The full JSON stays in the
+                # expanded body.
+                gist = inp.get("description") or inp.get("file_path") or \
+                    inp.get("pattern") or inp.get("query") or inp.get("url") or \
+                    inp.get("command") or inp.get("prompt") or \
+                    json.dumps(inp, ensure_ascii=False)
+                title = f"⚙ {c.get('name', '?')}  {clip(str(gist), 999)}"
                 pretty = json.dumps(inp, ensure_ascii=False, indent=2)
-                title = f"⚙ {c.get('name', '?')}  {clip(json.dumps(inp, ensure_ascii=False), 999)}"
                 events.append(Event("tool", ts, title, pretty, False, src))
             elif ct == "text":
                 body = c.get("text") or ""
