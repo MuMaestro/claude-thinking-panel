@@ -260,7 +260,11 @@ def main(stdscr, watch_dir):
                 session = None
             elif transcript and not ended and (not session or session.transcript != transcript):
                 session = Session(transcript, sid)
-                events.append(Event("meta", "--:--:--", f"━━ session {sid} ━━", "", False))
+                # New/switched session: clear the previous history — keeping
+                # old events mixed in confuses more than it helps.
+                events = [Event("meta", "--:--:--", f"━━ session {sid} ━━", "", False)]
+                scroll = 0
+                follow = True
             if session:
                 new = session.poll()
                 if new:
