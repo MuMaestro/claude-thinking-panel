@@ -84,6 +84,13 @@ def parse_line(raw, src):
                 body = c.get("thinking") or ""
                 if body.strip():
                     events.append(Event("thinking", ts, "💭 thinking", body, True, src))
+                else:
+                    # Block with empty text + signature: on Claude 5 models the
+                    # API only returns the reasoning text (a summary) when the
+                    # request asks for thinking.display="summarized"; with the
+                    # default "omitted" the block arrives empty — nothing to
+                    # show, for any tool.
+                    events.append(Event("ok", ts, "💭 thought (summary not exposed by the API in this mode — display: omitted)", "", False, src))
             elif ct == "tool_use":
                 inp = c.get("input", {}) or {}
                 # Collapsed line: the INTENT of the call, not the JSON. Order:
@@ -221,7 +228,10 @@ def build_lines(events, width, view):
         marker = " " if ev.kind in ("thinking", "meta") else ("▾" if ev.expanded else "▸")
         srcseg = f"[{ev.src}]" if ev.src else ""
         src = f"{srcseg} " if srcseg else ""
-        title = f"{marker} {ev.ts} {src}{ev.title}"
+        # Prefix kept outside clip/wrap: clip() normalizes whitespace and would
+        # swallow the thinking marker " ", misaligning it from ▸/▾ lines.
+        prefix = f"{marker} {ev.ts} "
+        title = prefix + f"{src}{ev.title}"
 
         def seg_in(text):
             if not srcseg:
@@ -237,7 +247,7 @@ def build_lines(events, width, view):
             for wt in textwrap.wrap(title, max(20, width - 1), subsequent_indent="      ") or [""]:
                 lines.append((wt, ev.kind, i, seg_in(wt)))
         else:
-            t = clip(title, max(10, width - 1))
+            t = prefix + clip(f"{src}{ev.title}", max(10, width - 1 - len(prefix)))
             lines.append((t, ev.kind, i, seg_in(t)))
         if ev.expanded and ev.body:
             for para in ev.body.split("\n"):
