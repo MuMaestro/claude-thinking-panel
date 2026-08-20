@@ -193,7 +193,15 @@ def build_lines(events, width):
         marker = " " if ev.kind in ("thinking", "meta") else ("▾" if ev.expanded else "▸")
         src = f"[{ev.src}] " if ev.src else ""
         title = f"{marker} {ev.ts} {src}{ev.title}"
-        lines.append((clip(title, max(10, width - 1)), ev.kind, i))
+        if ev.kind == "tool":
+            # A collapsed tool call doesn't cut the intent with "…": it wraps
+            # into indented continuation lines, all clickable for the same
+            # event. Other kinds stay on one line — long collapsed text or
+            # results spanning 10 lines would defeat the collapse.
+            for wt in textwrap.wrap(title, max(20, width - 1), subsequent_indent="      ") or [""]:
+                lines.append((wt, ev.kind, i))
+        else:
+            lines.append((clip(title, max(10, width - 1)), ev.kind, i))
         if ev.expanded and ev.body:
             for para in ev.body.split("\n"):
                 wrapped = textwrap.wrap(para, max(10, width - 6)) or [""]
