@@ -23,6 +23,7 @@ Usage: claude-watch [directory]   (default: $PWD)
 
 import bisect
 import curses
+import datetime
 import hashlib
 import json
 import os
@@ -40,6 +41,17 @@ HOME = os.path.expanduser("~")
 def pointer_path(watch_dir):
     h = hashlib.md5(watch_dir.encode()).hexdigest()[:8]
     return os.path.join(HOME, ".claude", "run", f"active-session-{h}.json")
+
+
+def local_hms(iso_ts):
+    """HH:MM:SS in the local timezone. The transcript records UTC (Z suffix);
+    showing that raw shifts the clock. The sort key stays the original ISO
+    string — only the display converts."""
+    try:
+        dt = datetime.datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        return iso_ts[11:19] or "--:--:--"
 
 
 def clip(s, n):
@@ -80,7 +92,7 @@ def parse_line(raw, src):
     if not isinstance(obj, dict):
         return []
     full_ts = obj.get("timestamp") or ""
-    ts = full_ts[11:19] or "--:--:--"
+    ts = local_hms(full_ts) if full_ts else "--:--:--"
     events = []
     msg = obj.get("message") or {}
     if obj.get("type") == "assistant":
