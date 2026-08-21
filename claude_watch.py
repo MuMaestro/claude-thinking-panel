@@ -21,6 +21,7 @@ token by token; that is the best an outside observer can get.
 Usage: claude-watch [directory]   (default: $PWD)
 """
 
+import bisect
 import curses
 import hashlib
 import json
@@ -47,15 +48,20 @@ def clip(s, n):
 
 
 class Event:
-    __slots__ = ("kind", "ts", "title", "body", "expanded", "src")
+    __slots__ = ("kind", "ts", "title", "body", "expanded", "src", "sk")
 
-    def __init__(self, kind, ts, title, body, expanded, src=""):
+    def __init__(self, kind, ts, title, body, expanded, src="", sk=""):
         self.kind = kind
         self.ts = ts
         self.title = title
         self.body = body.rstrip("\n")
         self.expanded = expanded
         self.src = src
+        # Sort key: the full ISO timestamp of the transcript line. Main and
+        # subagents write to separate files and the poll reads one file at a
+        # time, so without this, batches would group by agent instead of
+        # interleaving in the order they happened.
+        self.sk = sk
 
 
 def tool_result_text(block):
@@ -73,7 +79,8 @@ def parse_line(raw, src):
         return []
     if not isinstance(obj, dict):
         return []
-    ts = (obj.get("timestamp") or "")[11:19] or "--:--:--"
+    full_ts = obj.get("timestamp") or ""
+    ts = full_ts[11:19] or "--:--:--"
     events = []
     msg = obj.get("message") or {}
     if obj.get("type") == "assistant":
@@ -84,14 +91,14 @@ def parse_line(raw, src):
             if ct == "thinking":
                 body = c.get("thinking") or ""
                 if body.strip():
-                    events.append(Event("thinking", ts, "💭 thinking", body, True, src))
+                    events.append(Event("thinking", ts, "💭 thinking", body, True, src, full_ts))
                 else:
                     # Block with empty text + signature: on Claude 5 models the
                     # API only returns the reasoning text (a summary) when the
                     # request asks for thinking.display="summarized"; with the
                     # default "omitted" the block arrives empty — nothing to
                     # show, for any tool.
-                    events.append(Event("ok", ts, "💭 thought (summary not exposed by the API in this mode — display: omitted)", "", False, src))
+                    events.append(Event("ok", ts, "💭 thought (summary not exposed by the API in this mode — display: omitted)", "", False, src, full_ts))
             elif ct == "tool_use":
                 inp = c.get("input", {}) or {}
                 # Collapsed line: the INTENT of the call, not the JSON. Order:
@@ -104,23 +111,23 @@ def parse_line(raw, src):
                     json.dumps(inp, ensure_ascii=False)
                 title = f"⚙ {c.get('name', '?')}  {clip(str(gist), 999)}"
                 pretty = json.dumps(inp, ensure_ascii=False, indent=2)
-                events.append(Event("tool", ts, title, pretty, False, src))
+                events.append(Event("tool", ts, title, pretty, False, src, full_ts))
             elif ct == "text":
                 body = c.get("text") or ""
                 if body.strip():
-                    events.append(Event("text", ts, f"🗣 {clip(body, 999)}", body, False, src))
+                    events.append(Event("text", ts, f"🗣 {clip(body, 999)}", body, False, src, full_ts))
     elif obj.get("type") == "user":
         content = msg.get("content")
         if isinstance(content, str):
             if content.strip():
-                events.append(Event("user", ts, f"❯ {clip(content, 999)}", content, False, src))
+                events.append(Event("user", ts, f"❯ {clip(content, 999)}", content, False, src, full_ts))
         elif isinstance(content, list):
             for c in content:
                 if isinstance(c, dict) and c.get("type") == "tool_result":
                     body = tool_result_text(c)
                     kind = "err" if c.get("is_error") else "ok"
                     mark = "✘" if kind == "err" else "✔"
-                    events.append(Event(kind, ts, f"{mark} {clip(body, 999)}", body, False, src))
+                    events.append(Event(kind, ts, f"{mark} {clip(body, 999)}", body, False, src, full_ts))
     return events
 
 
@@ -180,6 +187,9 @@ class Session:
         self.session_id = session_id
         self.tailers = {transcript: Tailer(transcript, from_tail=True)}
         self.names = {transcript: ""}
+        # Subagents discovered but with no line read yet: the "↳" announcement
+        # waits for the first event to inherit its timestamp.
+        self.pending_announce = {}
 
     def poll(self):
         events = []
@@ -195,11 +205,18 @@ class Session:
                     self.tailers[p] = Tailer(p)
                     label = agent_display_name(p) or entry[: -len(".jsonl")]
                     self.names[p] = label
-                    events.append(Event("meta", "--:--:--", f"↳ subagent {label}", "", False, label))
+                    self.pending_announce[p] = label
         for path, tailer in self.tailers.items():
             lazy = self.names.get(path, "")
+            batch = []
             for raw in tailer.read_lines():
-                events.extend(parse_line(raw, lazy))
+                batch.extend(parse_line(raw, lazy))
+            label = self.pending_announce.pop(path, None)
+            if label is not None and batch:
+                # Announcement anchored to the subagent's first event timestamp,
+                # so the chronological merge places it next to what it announces.
+                events.append(Event("meta", batch[0].ts, f"↳ subagent {label}", "", False, label, batch[0].sk))
+            events.extend(batch)
         return events
 
 
@@ -307,6 +324,20 @@ def draw_help(stdscr, height, width):
         pass
 
 
+def insert_sorted(events, keys, new):
+    """Inserts events keeping global chronological order (main × subagents are
+    separate files, read one at a time — without a merge, each poll would
+    group batches by agent). Ties preserve arrival order. Events without a
+    timestamp (meta) inherit the tail key, so they keep showing up where they
+    appeared."""
+    for ev in new:
+        if not ev.sk:
+            ev.sk = keys[-1] if keys else ""
+        pos = bisect.bisect_right(keys, ev.sk)
+        keys.insert(pos, ev.sk)
+        events.insert(pos, ev)
+
+
 def read_pointer(ptr):
     try:
         with open(ptr, "r", encoding="utf-8") as f:
@@ -330,6 +361,7 @@ def main(stdscr, watch_dir):
     ptr = pointer_path(watch_dir)
     session = None
     events = [Event("meta", "--:--:--", f"waiting for a Claude Code session in {watch_dir}…", "", False)]
+    keys = [ev.sk for ev in events]
     scroll = 0
     follow = True
     last_poll = 0.0
@@ -353,19 +385,21 @@ def main(stdscr, watch_dir):
             last_poll = now
             transcript, sid, ended = read_pointer(ptr)
             if session and ended and sid == session.session_id:
-                events.append(Event("meta", "--:--:--", "— session ended — waiting for the next one…", "", False))
+                events.append(Event("meta", "--:--:--", "— session ended — waiting for the next one…", "", False, "", keys[-1] if keys else ""))
+                keys.append(events[-1].sk)
                 session = None
             elif transcript and not ended and (not session or session.transcript != transcript):
                 session = Session(transcript, sid)
                 # New/switched session: clear the previous history — keeping
                 # old events mixed in confuses more than it helps.
                 events = [Event("meta", "--:--:--", f"━━ session {sid} ━━", "", False)]
+                keys = [ev.sk for ev in events]
                 scroll = 0
                 follow = True
             if session:
                 new = session.poll()
                 if new:
-                    events.extend(new)
+                    insert_sorted(events, keys, new)
                     if follow:
                         scroll = 10 ** 9
 
