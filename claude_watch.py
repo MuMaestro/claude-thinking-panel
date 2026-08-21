@@ -25,6 +25,7 @@ import curses
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
@@ -259,6 +260,53 @@ def build_lines(events, width, view):
     return lines
 
 
+HELP_LINES = [
+    ("click", "expand/collapse the clicked event"),
+    ("wheel · ↑↓ · j/k", "scroll line by line"),
+    ("PgUp / PgDn", "scroll by page"),
+    ("f", "follow the tail again (auto-scroll)"),
+    ("s", "cycle the view: all → main → each subagent"),
+    ("e", "expand all events"),
+    ("c", "collapse all (thinking stays open)"),
+    ("+ / -", "widen / narrow the panel"),
+    ("F9", "toggle the panel (claude-think shortcut)"),
+    ("?", "show/hide this legend"),
+    ("q / Esc", "quit"),
+]
+
+
+def tmux_resize(direction, amount=5):
+    """Resizes the current tmux pane (claude-think's). Outside tmux, no-op."""
+    if not os.environ.get("TMUX"):
+        return
+    subprocess.run(
+        ["tmux", "resize-pane", direction, str(amount)],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def draw_help(stdscr, height, width):
+    """Centered legend with all the shortcuts."""
+    key_w = max(len(k) for k, _ in HELP_LINES)
+    body_w = max(len(f"{k.rjust(key_w)}  {d}") for k, d in HELP_LINES)
+    box_w = min(width - 2, body_w + 6)
+    box_h = min(height - 2, len(HELP_LINES) + 4)
+    top = max(0, (height - box_h) // 2)
+    left = max(0, (width - box_w) // 2)
+    try:
+        win = stdscr.subwin(box_h, box_w, top, left)
+        win.erase()
+        win.box()
+        title = " claude-watch shortcuts "
+        win.addstr(0, max(1, (box_w - len(title)) // 2), title, curses.A_BOLD | curses.color_pair(6))
+        for i, (k, d) in enumerate(HELP_LINES[: box_h - 4]):
+            win.addstr(2 + i, 3, k.rjust(key_w), curses.A_BOLD | curses.color_pair(2))
+            win.addstr(2 + i, 3 + key_w + 2, d[: box_w - key_w - 7])
+        win.refresh()
+    except curses.error:
+        pass
+
+
 def read_pointer(ptr):
     try:
         with open(ptr, "r", encoding="utf-8") as f:
@@ -286,6 +334,7 @@ def main(stdscr, watch_dir):
     follow = True
     last_poll = 0.0
     view = "all"  # "all" | "main" | a subagent name
+    show_help = False
 
     def attr_for(key):
         base = key.replace("_body", "")
@@ -345,13 +394,15 @@ def main(stdscr, watch_dir):
                     stdscr.addstr(y, 0, text, attr_for(key))
             except curses.error:
                 pass
-        status = " click: expand · s: view · f: follow · e/c: expand/collapse · q: quit "
+        status = " ?: help · click: expand · s: view · +/-: width · q: quit "
         mode = " [following] " if follow else f" [scroll {scroll}/{max_scroll}] "
         mode += f"[view: {clip(view, 30)}] "
         try:
             stdscr.addstr(height - 1, 0, clip(mode + status, width - 1), curses.A_REVERSE)
         except curses.error:
             pass
+        if show_help:
+            draw_help(stdscr, height, width)
         stdscr.refresh()
 
         try:
@@ -360,8 +411,20 @@ def main(stdscr, watch_dir):
             return
         if ch == -1:
             continue
+        if show_help and ch not in (curses.KEY_RESIZE, -1):
+            # Any key closes the legend (q quits for good).
+            show_help = False
+            if ch not in (ord("q"), 27):
+                continue
         if ch in (ord("q"), 27):
             return
+        elif ch == ord("?"):
+            show_help = True
+        elif ch in (ord("+"), ord("=")):
+            # The panel sits on the right: growing = pushing the left border.
+            tmux_resize("-L")
+        elif ch in (ord("-"), ord("_")):
+            tmux_resize("-R")
         elif ch == curses.KEY_RESIZE:
             continue
         elif ch in (curses.KEY_UP, ord("k")):
