@@ -249,6 +249,11 @@ def build_lines(events, width, view):
     or a subagent name (meta events always show).
     """
     lines = []
+    # With subagents in the history, main entries get [MAIN] so they don't
+    # look "ownerless" next to the labeled ones. Without subagents, no tag —
+    # and the criterion is re-evaluated every frame, so the tag appears on its
+    # own the moment the first subagent shows up.
+    has_sub = any(ev.src for ev in events)
     for i, ev in enumerate(events):
         if ev.kind != "meta":
             if view == "main" and ev.src:
@@ -256,7 +261,7 @@ def build_lines(events, width, view):
             if view not in ("all", "main") and ev.src != view:
                 continue
         marker = " " if ev.kind in ("thinking", "meta") else ("▾" if ev.expanded else "▸")
-        srcseg = f"[{ev.src}]" if ev.src else ""
+        srcseg = f"[{ev.src}]" if ev.src else ("[MAIN]" if has_sub and ev.kind != "meta" else "")
         src = f"{srcseg} " if srcseg else ""
         # Prefix kept outside clip/wrap: clip() normalizes whitespace and would
         # swallow the thinking marker " ", misaligning it from ▸/▾ lines.
