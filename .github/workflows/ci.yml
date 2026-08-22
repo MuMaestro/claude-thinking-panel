@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck claude-think.sh install.sh uninstall.sh hooks/*.sh
+
+      - name: ruff
+        run: pipx run ruff check claude_watch.py
+
+      - name: python syntax
+        run: python3 -m py_compile claude_watch.py
