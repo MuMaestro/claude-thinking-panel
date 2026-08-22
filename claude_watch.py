@@ -268,7 +268,7 @@ def build_lines(events, width, view):
         prefix = f"{marker} {ev.ts} "
         title = prefix + f"{src}{ev.title}"
 
-        def seg_in(text):
+        def seg_in(text, srcseg=srcseg):
             if not srcseg:
                 return None
             pos = text.find(srcseg)
